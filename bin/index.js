@@ -252,6 +252,9 @@ function importAnalysisPlugin() {
       await import_es_module_lexer2.init;
       const [imports] = (0, import_es_module_lexer2.parse)(code);
       const ms = new import_magic_string.default(code);
+      const { moduleGraph } = serverContext;
+      const curMod = moduleGraph.getModuleById(id);
+      const importedModules = /* @__PURE__ */ new Set();
       for (const importInfo of imports) {
         const { s: modStart, e: modEnd, n: modSource } = importInfo;
         if (!modSource)
@@ -264,13 +267,16 @@ function importAnalysisPlugin() {
         if (BARE_IMPORT_RE.test(modSource)) {
           const bundlePath = normalizePath(import_path6.default.join("/", PRE_BUNDLE_DIR, `${modSource}.js`));
           ms.overwrite(modStart, modEnd, bundlePath);
+          importedModules.add(bundlePath);
         } else if (modSource.startsWith(".") || modSource.startsWith("/")) {
           const resolved = await this.resolve(modSource, id);
           if (resolved) {
             ms.overwrite(modStart, modEnd, resolved.id);
+            importedModules.add(resolved.id);
           }
         }
       }
+      moduleGraph.updateModuleInfo(curMod, importedModules);
       return {
         code: ms.toString(),
         map: ms.generateMap()
@@ -471,8 +477,12 @@ function indexHtmlMiddware(serverContext) {
 var import_debug2 = __toESM(require("debug"));
 var debug2 = (0, import_debug2.default)("dev");
 async function transformRequest(url, serverContext) {
-  const { pluginContainer } = serverContext;
+  const { pluginContainer, moduleGraph } = serverContext;
   url = cleanUrl(url);
+  let mod = await moduleGraph.getModuleByUrl(url);
+  if (mod && mod.transformResult) {
+    return mod.transformResult;
+  }
   const resolvedResult = await pluginContainer.resolveId(url);
   let transformResult;
   if (resolvedResult?.id) {
@@ -480,9 +490,13 @@ async function transformRequest(url, serverContext) {
     if (typeof code === "object" && code !== null) {
       code = code.code;
     }
+    mod = await moduleGraph.ensureEntryFromUrl(url);
     if (code) {
       transformResult = await pluginContainer.transform(code, resolvedResult?.id);
     }
+  }
+  if (mod) {
+    mod.transformResult = transformResult;
   }
   return transformResult;
 }
@@ -524,6 +538,73 @@ function staticMiddleware() {
   };
 }
 
+// src/node/ModuleGraph.ts
+var ModuleNode = class {
+  constructor(url) {
+    this.id = null;
+    this.importers = /* @__PURE__ */ new Set();
+    this.importedModules = /* @__PURE__ */ new Set();
+    this.transformResult = null;
+    this.lastHMRTimestamp = 0;
+    this.url = url;
+  }
+};
+var ModuleGraph = class {
+  constructor(resolveId) {
+    this.resolveId = resolveId;
+    this.urlToModuleMap = /* @__PURE__ */ new Map();
+    this.idToModuleMap = /* @__PURE__ */ new Map();
+  }
+  getModuleById(id) {
+    return this.idToModuleMap.get(id);
+  }
+  async getModuleByUrl(rawUrl) {
+    const { url } = await this._resolve(rawUrl);
+    return this.urlToModuleMap.get(url);
+  }
+  async ensureEntryFromUrl(rawUrl) {
+    const { url, resolvedId } = await this._resolve(rawUrl);
+    if (this.urlToModuleMap.has(url)) {
+      return this.urlToModuleMap.get(url);
+    }
+    const mod = new ModuleNode(url);
+    mod.id = resolvedId;
+    this.urlToModuleMap.set(url, mod);
+    this.idToModuleMap.set(resolvedId, mod);
+    return mod;
+  }
+  async updateModuleInfo(mod, importedModules) {
+    const prevImports = mod.importedModules;
+    for (const curImports of importedModules) {
+      const dep = typeof curImports === "string" ? await this.ensureEntryFromUrl(cleanUrl(curImports)) : curImports;
+      if (dep) {
+        mod.importedModules.add(dep);
+        dep.importers.add(mod);
+      }
+    }
+    for (const prevImport of prevImports) {
+      if (!importedModules.has(prevImport.url)) {
+        prevImport.importers.delete(mod);
+      }
+    }
+  }
+  invalidateModule(file) {
+    const mod = this.idToModuleMap.get(file);
+    if (mod) {
+      mod.lastHMRTimestamp = Date.now();
+      mod.transformResult = null;
+      mod.importers.forEach((importer) => {
+        this.invalidateModule(importer.id);
+      });
+    }
+  }
+  async _resolve(url) {
+    const resolved = await this.resolveId(url);
+    const resolvedId = resolved?.id || url;
+    return { url, resolvedId };
+  }
+};
+
 // src/node/server/index.ts
 async function startDevServer() {
   const app = (0, import_connect.default)();
@@ -531,11 +612,13 @@ async function startDevServer() {
   const startTime = Date.now();
   const plugins = resolvePlugins();
   const pluginContainer = createPluginContainer(plugins);
+  const moduleGraph = new ModuleGraph((url) => pluginContainer.resolveId(url));
   const serverContext = {
     root: process.cwd(),
     app,
     pluginContainer,
-    plugins
+    plugins,
+    moduleGraph
   };
   for (const plugin of plugins) {
     if (plugin.configureServer) {
