@@ -8,6 +8,9 @@ import { indexHtmlMiddware } from "./middlewares/indexHtml";
 import { transformMiddleware } from "./middlewares/transform";
 import { staticMiddleware } from "./middlewares/static";
 import { ModuleGraph } from "../ModuleGraph";
+import chokidar, { FSWatcher } from "chokidar";
+import { createWebSocketServer } from "../ws";
+import { bindingHMREvents } from "../hmr";
 
 export interface ServerContext {
   root: string;
@@ -15,6 +18,8 @@ export interface ServerContext {
   app: connect.Server;
   plugins: Plugin[];
   moduleGraph: ModuleGraph;
+  ws: { send: (data: any) => void; close: () => void };
+  watcher: FSWatcher;
 }
 
 export async function startDevServer() {
@@ -23,7 +28,14 @@ export async function startDevServer() {
   const startTime = Date.now();
   const plugins = resolvePlugins();
   const pluginContainer = createPluginContainer(plugins);
-  const moduleGraph = new ModuleGraph((url) => pluginContainer.resolveId(url));
+  const moduleGraph = new ModuleGraph((url, importer) =>
+    pluginContainer.resolveId(url, importer)
+  );
+  const watcher = chokidar.watch(root, {
+    ignored: ["**/node_modules/**", "**/.git/**"],
+    ignoreInitial: true,
+  });
+  const ws = createWebSocketServer(app);
 
   const serverContext: ServerContext = {
     root: process.cwd(),
@@ -31,6 +43,8 @@ export async function startDevServer() {
     pluginContainer,
     plugins,
     moduleGraph,
+    ws,
+    watcher,
   };
 
   for (const plugin of plugins) {
@@ -38,6 +52,7 @@ export async function startDevServer() {
       await plugin.configureServer(serverContext);
     }
   }
+  bindingHMREvents(serverContext);
 
   // // 核心编译逻辑
   app.use(transformMiddleware(serverContext));

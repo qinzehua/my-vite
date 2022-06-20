@@ -33,3 +33,6 @@ export function isImportRequest(url: string): boolean {
 export function removeImportQuery(url: string): string {
   return url.replace(/\?import$/, "");
 }
+export function getShortName(file: string, root: string) {
+  return file.startsWith(root + "/") ? path.posix.relative(root, file) : file;
+}

@@ -22,7 +22,10 @@ export class ModuleGraph {
   idToModuleMap = new Map<string, ModuleNode>();
 
   constructor(
-    private resolveId: (url: string) => Promise<PartialResolvedId | null>
+    private resolveId: (
+      url: string,
+      importer?: string
+    ) => Promise<PartialResolvedId | null>
   ) {}
 
   getModuleById(id: string): ModuleNode | undefined {
@@ -34,8 +37,12 @@ export class ModuleGraph {
     return this.urlToModuleMap.get(url);
   }
 
-  async ensureEntryFromUrl(rawUrl: string): Promise<ModuleNode> {
-    const { url, resolvedId } = await this._resolve(rawUrl);
+  async ensureEntryFromUrl(
+    rawUrl: string,
+    importer?: string
+  ): Promise<ModuleNode> {
+    console.log(rawUrl);
+    const { url, resolvedId } = await this._resolve(rawUrl, importer);
     // 首先检查缓存
     if (this.urlToModuleMap.has(url)) {
       return this.urlToModuleMap.get(url) as ModuleNode;
@@ -56,7 +63,7 @@ export class ModuleGraph {
     for (const curImports of importedModules) {
       const dep =
         typeof curImports === "string"
-          ? await this.ensureEntryFromUrl(cleanUrl(curImports))
+          ? await this.ensureEntryFromUrl(cleanUrl(curImports), mod.id!)
           : curImports;
       if (dep) {
         mod.importedModules.add(dep);
@@ -85,9 +92,11 @@ export class ModuleGraph {
   }
 
   private async _resolve(
-    url: string
+    url: string,
+    importer?: string
   ): Promise<{ url: string; resolvedId: string }> {
-    const resolved = await this.resolveId(url);
+    console.log(1);
+    const resolved = await this.resolveId(url, importer);
     const resolvedId = resolved?.id || url;
     return { url, resolvedId };
   }
